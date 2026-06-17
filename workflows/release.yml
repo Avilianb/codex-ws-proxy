@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,9 +19,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
           go-version: "1.23"
 
@@ -26,14 +34,16 @@ jobs:
         run: go build -ldflags="-s -w" -o codex-ws-proxy.exe .
 
       - name: Package
+        shell: powershell
         run: |
-          mkdir dist
-          copy codex-ws-proxy.exe dist\
-          copy README.md dist\
-          copy a.example.json dist\
-          powershell Compress-Archive -Path dist\* -DestinationPath codex-ws-proxy-windows-amd64.zip
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item codex-ws-proxy.exe dist\
+          Copy-Item README.md dist\
+          Copy-Item a.example.json dist\
+          Compress-Archive -Path dist\* -DestinationPath codex-ws-proxy-windows-amd64.zip -Force
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
           files: codex-ws-proxy-windows-amd64.zip
