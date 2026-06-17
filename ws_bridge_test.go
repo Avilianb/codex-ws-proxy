@@ -68,6 +68,77 @@ func TestWebSocketPrewarmDoesNotHitUpstream(t *testing.T) {
 	}
 }
 
+func TestWebSocketBridgePostsHTTPAndStreamsSSEData(t *testing.T) {
+	upstreamBodies := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Errorf("Accept = %q", r.Header.Get("Accept"))
+		}
+		if r.Header.Get("Authorization") != "Bearer relay-key" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		upstreamBodies <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	frame := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-test",
+		"input":                []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "hi"}}}},
+		"tools":                []any{},
+		"stream":               true,
+		"generate":             true,
+		"previous_response_id": "resp-old",
+	}
+	payload, _ := json.Marshal(frame)
+	writeTestWSText(t, conn, payload)
+
+	first := readTestWSText(t, conn)
+	second := readTestWSText(t, conn)
+	if string(first) == string(second) {
+		t.Fatalf("expected distinct events")
+	}
+
+	body := <-upstreamBodies
+	if _, ok := body["type"]; ok {
+		t.Fatalf("type leaked to upstream body: %#v", body)
+	}
+	if _, ok := body["generate"]; ok {
+		t.Fatalf("generate leaked to upstream body: %#v", body)
+	}
+	if _, ok := body["previous_response_id"]; ok {
+		t.Fatalf("previous_response_id leaked to upstream body: %#v", body)
+	}
+	if body["stream"] != true {
+		t.Fatalf("stream = %#v", body["stream"])
+	}
+}
+
 type testWSConn struct {
 	net.Conn
 	r *bufio.Reader

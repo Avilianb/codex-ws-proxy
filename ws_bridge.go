@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -67,7 +68,84 @@ func (p *Proxy) handleWSMessage(ctx context.Context, conn *wsConn, state *Bridge
 	if generate, ok := msg["generate"].(bool); ok && !generate {
 		return writeLocalPrewarm(ctx, conn, state)
 	}
-	return fmt.Errorf("upstream bridge is not implemented yet")
+	return p.bridgeToUpstream(ctx, conn, state, msg, http.Header{})
+}
+
+func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *BridgeState, msg map[string]any, incoming http.Header) error {
+	body, err := state.BuildHTTPBody(msg)
+	if err != nil {
+		return fmt.Errorf("build HTTP body: %w", err)
+	}
+	upstreamURL, err := p.cfg.UpstreamURLFor(p.cfg.LocalBasePath + "/responses")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header = SanitizeHeaders(incoming, p.cfg)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return sendWSError(ctx, conn, "upstream request failed", err.Error())
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return sendWSError(ctx, conn, fmt.Sprintf("upstream returned %d", resp.StatusCode), string(detail))
+	}
+
+	return readSSEData(resp.Body, func(data []byte) error {
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" || trimmed == "[DONE]" {
+			return nil
+		}
+		state.UpdateFromSSEData(data)
+		return conn.writeText(ctx, data)
+	})
+}
+
+func readSSEData(r io.Reader, onData func([]byte) error) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var dataLines [][]byte
+	flush := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		data := bytes.Join(dataLines, []byte("\n"))
+		dataLines = nil
+		return onData(data)
+	}
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			if err := flush(); err != nil {
+				return err
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			copied := append([]byte(nil), value...)
+			dataLines = append(dataLines, copied)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return flush()
+}
+
+func sendWSError(ctx context.Context, conn *wsConn, message, detail string) error {
+	payload, _ := json.Marshal(map[string]any{
+		"type":  "response.failed",
+		"error": map[string]any{"message": message, "detail": detail},
+	})
+	return conn.writeText(ctx, payload)
 }
 
 func writeLocalPrewarm(ctx context.Context, conn *wsConn, state *BridgeState) error {
@@ -90,14 +168,14 @@ func writeLocalPrewarm(ctx context.Context, conn *wsConn, state *BridgeState) er
 }
 
 const (
-	wsOpcodeText   = 0x1
-	wsOpcodeClose  = 0x8
-	wsOpcodePing   = 0x9
-	wsOpcodePong   = 0xA
-	wsMagicGUID    = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	wsCloseNormalClosure  = 1000
-	wsCloseUnsupportedData = 1003
-	wsClosePolicyViolation = 1008
+	wsOpcodeText             = 0x1
+	wsOpcodeClose            = 0x8
+	wsOpcodePing             = 0x9
+	wsOpcodePong             = 0xA
+	wsMagicGUID              = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	wsCloseNormalClosure     = 1000
+	wsCloseUnsupportedData   = 1003
+	wsClosePolicyViolation   = 1008
 )
 
 func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
