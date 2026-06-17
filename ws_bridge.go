@@ -353,6 +353,10 @@ func compressWSMessage(payload []byte) ([]byte, error) {
 		writer.Close()
 		return nil, err
 	}
+	if err := writer.Flush(); err != nil {
+		writer.Close()
+		return nil, err
+	}
 	if err := writer.Close(); err != nil {
 		return nil, err
 	}

@@ -14,6 +14,34 @@ func decodeBody(t *testing.T, body []byte) map[string]any {
 	return out
 }
 
+func TestBridgeStateReplacesContextWhenNoPreviousResponseID(t *testing.T) {
+	state := NewBridgeState()
+	first := map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "old"}}}},
+		"tools": []any{},
+	}
+	if _, err := state.BuildHTTPBody(first); err != nil {
+		t.Fatal(err)
+	}
+
+	second := map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "new"}}}},
+		"tools": []any{},
+	}
+	body, err := state.BuildHTTPBody(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = decodeBody(t, body)
+	if len(state.fullInput) != 1 {
+		t.Fatalf("fullInput length = %d, want 1: %#v", len(state.fullInput), state.fullInput)
+	}
+}
+
 func TestBridgeStateReconstructsFunctionCallOutputContext(t *testing.T) {
 	state := NewBridgeState()
 	first := map[string]any{

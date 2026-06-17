@@ -51,7 +51,11 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	if _, ok := body["stream"]; !ok {
 		body["stream"] = true
 	}
-	s.fullInput = appendDedupe(s.fullInput, reconstructed...)
+	if previousID == "" {
+		s.fullInput = cloneItems(reconstructed)
+	} else {
+		s.fullInput = appendDedupe(s.fullInput, reconstructed...)
+	}
 	return json.Marshal(body)
 }
 
