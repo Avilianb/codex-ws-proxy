@@ -1,0 +1,205 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestWebSocketPrewarmDoesNotHitUpstream(t *testing.T) {
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	prewarm := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": false,
+	}
+	payload, _ := json.Marshal(prewarm)
+	writeTestWSText(t, conn, payload)
+
+	first := readTestWSText(t, conn)
+	second := readTestWSText(t, conn)
+
+	if upstreamHits != 0 {
+		t.Fatalf("upstream was hit %d times", upstreamHits)
+	}
+	if !json.Valid(first) || !json.Valid(second) {
+		t.Fatalf("prewarm events were not JSON: %q %q", first, second)
+	}
+	var created map[string]any
+	if err := json.Unmarshal(first, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created["type"] != "response.created" {
+		t.Fatalf("first event type = %v", created["type"])
+	}
+}
+
+type testWSConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func dialTestWS(t *testing.T, ctx context.Context, rawURL string) *testWSConn {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial websocket tcp: %v", err)
+	}
+	keyBytes := make([]byte, 16)
+	if _, err := rand.Read(keyBytes); err != nil {
+		t.Fatal(err)
+	}
+	key := base64.StdEncoding.EncodeToString(keyBytes)
+	path := u.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+	_, err = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, key)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("write handshake: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(r, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		conn.Close()
+		t.Fatalf("read handshake: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		conn.Close()
+		t.Fatalf("handshake status = %d", resp.StatusCode)
+	}
+	wantAccept := computeAcceptKey(key)
+	if got := resp.Header.Get("Sec-WebSocket-Accept"); got != wantAccept {
+		conn.Close()
+		t.Fatalf("accept = %q, want %q", got, wantAccept)
+	}
+	return &testWSConn{Conn: conn, r: r}
+}
+
+func writeTestWSText(t *testing.T, conn *testWSConn, payload []byte) {
+	t.Helper()
+	frame := []byte{0x81}
+	maskKey := []byte{1, 2, 3, 4}
+	length := len(payload)
+	switch {
+	case length < 126:
+		frame = append(frame, 0x80|byte(length))
+	case length <= 65535:
+		frame = append(frame, 0x80|126, byte(length>>8), byte(length))
+	default:
+		frame = append(frame, 0x80|127)
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], uint64(length))
+		frame = append(frame, b[:]...)
+	}
+	frame = append(frame, maskKey...)
+	for i, b := range payload {
+		frame = append(frame, b^maskKey[i%4])
+	}
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write websocket frame: %v", err)
+	}
+}
+
+func readTestWSText(t *testing.T, conn *testWSConn) []byte {
+	t.Helper()
+	for {
+		payload, opcode := readTestWSFrame(t, conn.r)
+		switch opcode {
+		case 0x1:
+			return payload
+		case 0x8:
+			t.Fatalf("websocket closed: %q", payload)
+		case 0x9, 0xA:
+			continue
+		default:
+			t.Fatalf("unexpected opcode %d", opcode)
+		}
+	}
+}
+
+func readTestWSFrame(t *testing.T, r *bufio.Reader) ([]byte, byte) {
+	t.Helper()
+	head := make([]byte, 2)
+	if _, err := io.ReadFull(r, head); err != nil {
+		t.Fatalf("read websocket header: %v", err)
+	}
+	opcode := head[0] & 0x0f
+	masked := head[1]&0x80 != 0
+	length := uint64(head[1] & 0x7f)
+	if length == 126 {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			t.Fatalf("read websocket length16: %v", err)
+		}
+		length = uint64(binary.BigEndian.Uint16(buf))
+	} else if length == 127 {
+		buf := make([]byte, 8)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			t.Fatalf("read websocket length64: %v", err)
+		}
+		length = binary.BigEndian.Uint64(buf)
+	}
+	var maskKey []byte
+	if masked {
+		maskKey = make([]byte, 4)
+		if _, err := io.ReadFull(r, maskKey); err != nil {
+			t.Fatalf("read websocket mask: %v", err)
+		}
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read websocket payload: %v", err)
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= maskKey[i%4]
+		}
+	}
+	return payload, opcode
+}
+
+func computeAcceptKey(key string) string {
+	h := sha1.Sum([]byte(strings.TrimSpace(key) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(h[:])
+}

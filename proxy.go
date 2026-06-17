@@ -27,7 +27,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.URL.Path == p.cfg.LocalBasePath+"/responses" && isWebSocketUpgrade(r) {
+		p.handleResponsesWebSocket(w, r)
+		return
+	}
 	p.handleHTTP(w, r)
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") && strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
