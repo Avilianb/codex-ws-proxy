@@ -30,7 +30,7 @@ func (p *Proxy) handleResponsesWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer conn.close()
 
-	state := &BridgeState{}
+	state := NewBridgeState()
 	ctx := r.Context()
 	for {
 		data, opcode, err := conn.readFrame()
