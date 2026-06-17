@@ -36,14 +36,14 @@ func SanitizeResponseHeaders(in http.Header) http.Header {
 func IsSensitiveRequestHeader(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	exact := map[string]bool{
-		"authorization":        true,
-		"cookie":               true,
-		"set-cookie":           true,
-		"proxy-authorization":  true,
-		"x-stainless-auth":     true,
-		"session-id":           true,
-		"thread-id":            true,
-		"x-client-request-id":  true,
+		"authorization":       true,
+		"cookie":              true,
+		"set-cookie":          true,
+		"proxy-authorization": true,
+		"x-stainless-auth":    true,
+		"session-id":          true,
+		"thread-id":           true,
+		"x-client-request-id": true,
 	}
 	if exact[lower] {
 		return true

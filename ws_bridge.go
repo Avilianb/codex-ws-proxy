@@ -168,14 +168,14 @@ func writeLocalPrewarm(ctx context.Context, conn *wsConn, state *BridgeState) er
 }
 
 const (
-	wsOpcodeText             = 0x1
-	wsOpcodeClose            = 0x8
-	wsOpcodePing             = 0x9
-	wsOpcodePong             = 0xA
-	wsMagicGUID              = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	wsCloseNormalClosure     = 1000
-	wsCloseUnsupportedData   = 1003
-	wsClosePolicyViolation   = 1008
+	wsOpcodeText           = 0x1
+	wsOpcodeClose          = 0x8
+	wsOpcodePing           = 0x9
+	wsOpcodePong           = 0xA
+	wsMagicGUID            = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	wsCloseNormalClosure   = 1000
+	wsCloseUnsupportedData = 1003
+	wsClosePolicyViolation = 1008
 )
 
 func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
