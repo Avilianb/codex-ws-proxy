@@ -139,12 +139,50 @@ func TestWebSocketBridgePostsHTTPAndStreamsSSEData(t *testing.T) {
 	}
 }
 
+func TestWebSocketCompressionNegotiationFollowsConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		enabled       bool
+		wantExtension bool
+	}{
+		{name: "enabled", enabled: true, wantExtension: true},
+		{name: "disabled", enabled: false, wantExtension: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			defer upstream.Close()
+
+			cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key", WebSocketCompression: &tc.enabled}
+			cfg.ApplyDefaults()
+			proxy := NewProxy(cfg, upstream.Client())
+			server := httptest.NewServer(proxy)
+			defer server.Close()
+
+			wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			conn, resp := dialTestWSWithExtensions(t, ctx, wsURL, "permessage-deflate")
+			defer conn.Close()
+
+			gotExtension := strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate")
+			if gotExtension != tc.wantExtension {
+				t.Fatalf("extension negotiated = %v, want %v", gotExtension, tc.wantExtension)
+			}
+		})
+	}
+}
+
 type testWSConn struct {
 	net.Conn
 	r *bufio.Reader
 }
 
 func dialTestWS(t *testing.T, ctx context.Context, rawURL string) *testWSConn {
+	conn, _ := dialTestWSWithExtensions(t, ctx, rawURL, "")
+	return conn
+}
+
+func dialTestWSWithExtensions(t *testing.T, ctx context.Context, rawURL, extensions string) (*testWSConn, *http.Response) {
 	t.Helper()
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -164,7 +202,11 @@ func dialTestWS(t *testing.T, ctx context.Context, rawURL string) *testWSConn {
 	if path == "" {
 		path = "/"
 	}
-	_, err = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, key)
+	extHeader := ""
+	if extensions != "" {
+		extHeader = "Sec-WebSocket-Extensions: " + extensions + "\r\n"
+	}
+	_, err = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n%s\r\n", path, u.Host, key, extHeader)
 	if err != nil {
 		conn.Close()
 		t.Fatalf("write handshake: %v", err)
@@ -184,7 +226,7 @@ func dialTestWS(t *testing.T, ctx context.Context, rawURL string) *testWSConn {
 		conn.Close()
 		t.Fatalf("accept = %q, want %q", got, wantAccept)
 	}
-	return &testWSConn{Conn: conn, r: r}
+	return &testWSConn{Conn: conn, r: r}, resp
 }
 
 func writeTestWSText(t *testing.T, conn *testWSConn, payload []byte) {

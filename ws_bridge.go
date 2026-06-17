@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -18,12 +19,13 @@ import (
 )
 
 type wsConn struct {
-	conn net.Conn
-	r    *bufio.Reader
+	conn       net.Conn
+	r          *bufio.Reader
+	compressed bool
 }
 
 func (p *Proxy) handleResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := acceptWS(w, r)
+	conn, err := acceptWS(w, r, p.cfg.WebSocketCompression != nil && *p.cfg.WebSocketCompression)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -169,6 +171,7 @@ func writeLocalPrewarm(ctx context.Context, conn *wsConn, state *BridgeState) er
 
 const (
 	wsOpcodeText           = 0x1
+	wsOpcodeBinary         = 0x2
 	wsOpcodeClose          = 0x8
 	wsOpcodePing           = 0x9
 	wsOpcodePong           = 0xA
@@ -178,7 +181,7 @@ const (
 	wsClosePolicyViolation = 1008
 )
 
-func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
+func acceptWS(w http.ResponseWriter, r *http.Request, allowCompression bool) (*wsConn, error) {
 	if !isWebSocketUpgrade(r) {
 		return nil, errors.New("not a websocket upgrade")
 	}
@@ -194,11 +197,16 @@ func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	compressed := allowCompression && clientRequestedDeflate(r.Header.Get("Sec-WebSocket-Extensions"))
 	accept := computeWebSocketAccept(key)
 	response := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+		"Sec-WebSocket-Accept: " + accept + "\r\n"
+	if compressed {
+		response += "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"
+	}
+	response += "\r\n"
 	if _, err := rw.WriteString(response); err != nil {
 		netConn.Close()
 		return nil, err
@@ -207,7 +215,16 @@ func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 		netConn.Close()
 		return nil, err
 	}
-	return &wsConn{conn: netConn, r: rw.Reader}, nil
+	return &wsConn{conn: netConn, r: rw.Reader, compressed: compressed}, nil
+}
+
+func clientRequestedDeflate(ext string) bool {
+	for _, part := range strings.Split(ext, ",") {
+		if strings.EqualFold(strings.TrimSpace(strings.Split(part, ";")[0]), "permessage-deflate") {
+			return true
+		}
+	}
+	return false
 }
 
 func computeWebSocketAccept(key string) string {
@@ -242,7 +259,17 @@ func (c *wsConn) writeFrameContext(ctx context.Context, opcode byte, payload []b
 	}
 	defer c.conn.SetWriteDeadline(time.Time{})
 
-	frame := []byte{0x80 | opcode}
+	firstByte := byte(0x80 | opcode)
+	if c.compressed && (opcode == wsOpcodeText || opcode == wsOpcodeBinary) && len(payload) > 0 {
+		compressed, err := compressWSMessage(payload)
+		if err != nil {
+			return err
+		}
+		payload = compressed
+		firstByte |= 0x40
+	}
+
+	frame := []byte{firstByte}
 	length := len(payload)
 	switch {
 	case length < 126:
@@ -266,6 +293,7 @@ func (c *wsConn) readFrame() ([]byte, byte, error) {
 		return nil, 0, err
 	}
 	fin := head[0]&0x80 != 0
+	rsv1 := head[0]&0x40 != 0
 	opcode := head[0] & 0x0f
 	if !fin {
 		return nil, 0, errors.New("fragmented websocket frames are not supported")
@@ -302,5 +330,42 @@ func (c *wsConn) readFrame() ([]byte, byte, error) {
 	for i := range payload {
 		payload[i] ^= maskKey[i%4]
 	}
+	if rsv1 {
+		if !c.compressed || (opcode != wsOpcodeText && opcode != wsOpcodeBinary) {
+			return nil, 0, errors.New("unexpected compressed websocket frame")
+		}
+		inflated, err := decompressWSMessage(payload)
+		if err != nil {
+			return nil, 0, err
+		}
+		payload = inflated
+	}
 	return payload, opcode, nil
+}
+
+func compressWSMessage(payload []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(payload); err != nil {
+		writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	out := buf.Bytes()
+	if len(out) >= 4 && bytes.Equal(out[len(out)-4:], []byte{0x00, 0x00, 0xff, 0xff}) {
+		out = out[:len(out)-4]
+	}
+	return append([]byte(nil), out...), nil
+}
+
+func decompressWSMessage(payload []byte) ([]byte, error) {
+	data := append(append([]byte(nil), payload...), 0x00, 0x00, 0xff, 0xff)
+	reader := flate.NewReader(bytes.NewReader(data))
+	defer reader.Close()
+	return io.ReadAll(io.LimitReader(reader, 16*1024*1024))
 }
