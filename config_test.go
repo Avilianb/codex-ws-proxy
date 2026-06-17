@@ -55,6 +55,19 @@ func TestLoadConfigRejectsMissingRequiredValues(t *testing.T) {
 	}
 }
 
+func TestConfigPathCandidatesPreferExecutableDirThenWorkingDir(t *testing.T) {
+	candidates := ConfigPathCandidates("/tmp/proxy/codex-ws-proxy", "/work")
+	if len(candidates) != 2 {
+		t.Fatalf("candidate count = %d", len(candidates))
+	}
+	if candidates[0] != "/tmp/proxy/a.json" {
+		t.Fatalf("first candidate = %q", candidates[0])
+	}
+	if candidates[1] != "/work/a.json" {
+		t.Fatalf("second candidate = %q", candidates[1])
+	}
+}
+
 func TestUpstreamURLForMapsLocalBasePath(t *testing.T) {
 	cfg := Config{
 		UpstreamBaseURL: "https://relay.example/v1/",

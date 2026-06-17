@@ -1,0 +1,12 @@
+{
+  "listen": "127.0.0.1:39493",
+  "upstream_base_url": "https://example-relay.com/v1",
+  "local_base_path": "/v1",
+  "api_key": "replace-with-api-key",
+  "auth_header": "Authorization",
+  "auth_scheme": "Bearer",
+  "websocket_mode": "bridge",
+  "websocket_compression": true,
+  "timeout_seconds": 600,
+  "log_requests": true
+}

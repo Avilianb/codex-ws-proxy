@@ -91,6 +91,20 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func ConfigPathCandidates(executablePath, workingDir string) []string {
+	candidates := []string{}
+	if executablePath != "" {
+		candidates = append(candidates, path.Join(path.Dir(executablePath), "a.json"))
+	}
+	if workingDir != "" {
+		cwdPath := path.Join(workingDir, "a.json")
+		if len(candidates) == 0 || candidates[0] != cwdPath {
+			candidates = append(candidates, cwdPath)
+		}
+	}
+	return candidates
+}
+
 func (c Config) UpstreamURLFor(localURL string) (string, error) {
 	parsedLocal, err := url.ParseRequestURI(localURL)
 	if err != nil {
