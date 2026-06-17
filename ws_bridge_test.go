@@ -172,6 +172,130 @@ func TestWebSocketCompressionNegotiationFollowsConfig(t *testing.T) {
 	}
 }
 
+func TestWebSocketCompressionNegotiatedPrewarmFrameIsReadable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	enabled := true
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key", WebSocketCompression: &enabled}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, resp := dialTestWSWithExtensions(t, ctx, wsURL, "permessage-deflate")
+	defer conn.Close()
+	if !strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		t.Fatalf("compression was not negotiated")
+	}
+
+	prewarm := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": false,
+	}
+	payload, _ := json.Marshal(prewarm)
+	writeTestWSText(t, conn, payload)
+
+	first, opcode, compressed := readTestWSFrameWithFlags(t, conn.r)
+	if opcode != 0x1 {
+		t.Fatalf("opcode = %d", opcode)
+	}
+	if !compressed {
+		t.Fatalf("expected compressed server frame")
+	}
+	inflated, err := decompressWSMessage(first)
+	if err != nil {
+		t.Fatalf("decompress server frame: %v", err)
+	}
+	if !json.Valid(inflated) {
+		t.Fatalf("inflated frame is not JSON: %q", inflated)
+	}
+}
+
+func TestWebSocketProtocolErrorSendsCloseFrame(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	// Client-to-server frames must be masked. This deliberately invalid frame
+	// exercises the server-side protocol-error path.
+	if _, err := conn.Write([]byte{0x81, 0x02, 'o', 'k'}); err != nil {
+		t.Fatalf("write invalid websocket frame: %v", err)
+	}
+
+	payload, opcode := readTestWSFrame(t, conn.r)
+	if opcode != wsOpcodeClose {
+		t.Fatalf("opcode = %d, want close; payload %q", opcode, payload)
+	}
+	if len(payload) < 2 || binary.BigEndian.Uint16(payload[:2]) != wsClosePolicyViolation {
+		t.Fatalf("close payload = %v, want policy violation", payload)
+	}
+}
+
+func readTestWSFrameWithFlags(t *testing.T, r *bufio.Reader) ([]byte, byte, bool) {
+	t.Helper()
+	head := make([]byte, 2)
+	if _, err := io.ReadFull(r, head); err != nil {
+		t.Fatalf("read websocket header: %v", err)
+	}
+	opcode := head[0] & 0x0f
+	compressed := head[0]&0x40 != 0
+	masked := head[1]&0x80 != 0
+	length := uint64(head[1] & 0x7f)
+	if length == 126 {
+		buf := make([]byte, 2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			t.Fatalf("read websocket length16: %v", err)
+		}
+		length = uint64(binary.BigEndian.Uint16(buf))
+	} else if length == 127 {
+		buf := make([]byte, 8)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			t.Fatalf("read websocket length64: %v", err)
+		}
+		length = binary.BigEndian.Uint64(buf)
+	}
+	var maskKey []byte
+	if masked {
+		maskKey = make([]byte, 4)
+		if _, err := io.ReadFull(r, maskKey); err != nil {
+			t.Fatalf("read websocket mask: %v", err)
+		}
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read websocket payload: %v", err)
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= maskKey[i%4]
+		}
+	}
+	return payload, opcode, compressed
+}
+
 type testWSConn struct {
 	net.Conn
 	r *bufio.Reader

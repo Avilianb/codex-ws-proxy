@@ -37,6 +37,9 @@ func (p *Proxy) handleResponsesWebSocket(w http.ResponseWriter, r *http.Request)
 	for {
 		data, opcode, err := conn.readFrame()
 		if err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				_ = conn.writeClose(wsClosePolicyViolation, err.Error())
+			}
 			return
 		}
 		switch opcode {
