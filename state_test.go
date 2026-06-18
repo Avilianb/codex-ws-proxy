@@ -91,3 +91,66 @@ func TestBridgeStateReconstructsFunctionCallOutputContext(t *testing.T) {
 		t.Fatalf("previous_response_id leaked: %#v", decoded)
 	}
 }
+
+func TestBridgeStatePreservesServiceTier(t *testing.T) {
+	state := NewBridgeState()
+	body, err := state.BuildHTTPBody(map[string]any{
+		"type":         "response.create",
+		"model":        "gpt-test",
+		"service_tier": "priority",
+		"input":        []any{map[string]any{"type": "message", "role": "user"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeBody(t, body)
+	if decoded["service_tier"] != "priority" {
+		t.Fatalf("service_tier = %#v", decoded["service_tier"])
+	}
+}
+
+func TestBridgeStateDropsNullSummaryFromReconstructedContext(t *testing.T) {
+	state := NewBridgeState()
+	_, err := state.BuildHTTPBody(map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{map[string]any{"type": "message", "role": "user"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state.UpdateFromSSEData([]byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"reasoning","id":"rs-1","summary":null},{"type":"reasoning","id":"rs-2","summary":[{"type":"summary_text","text":"kept"}]}]}}`))
+	body, err := state.BuildHTTPBody(map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-test",
+		"previous_response_id": "resp-1",
+		"input":                []any{map[string]any{"type": "message", "role": "user"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeBody(t, body)
+	input := decoded["input"].([]any)
+
+	var sawNullSummary bool
+	var sawNonNullSummary bool
+	for _, raw := range input {
+		item, ok := raw.(map[string]any)
+		if !ok || item["type"] != "reasoning" {
+			continue
+		}
+		if item["id"] == "rs-1" {
+			_, sawNullSummary = item["summary"]
+		}
+		if item["id"] == "rs-2" {
+			_, sawNonNullSummary = item["summary"]
+		}
+	}
+	if sawNullSummary {
+		t.Fatalf("null summary was preserved: %#v", input)
+	}
+	if !sawNonNullSummary {
+		t.Fatalf("non-null summary was removed: %#v", input)
+	}
+}

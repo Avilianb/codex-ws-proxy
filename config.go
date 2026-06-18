@@ -66,8 +66,8 @@ func (c *Config) ApplyDefaults() {
 		c.TimeoutSeconds = 600
 	}
 	if c.WebSocketCompression == nil {
-		enabled := true
-		c.WebSocketCompression = &enabled
+		disabled := false
+		c.WebSocketCompression = &disabled
 	}
 	c.UpstreamBaseURL = strings.TrimRight(c.UpstreamBaseURL, "/")
 }

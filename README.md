@@ -22,7 +22,7 @@ Place `a.json` next to the binary, or in the working directory when running with
   "auth_header": "Authorization",
   "auth_scheme": "Bearer",
   "websocket_mode": "bridge",
-  "websocket_compression": true,
+  "websocket_compression": false,
   "timeout_seconds": 600,
   "log_requests": false
 }
@@ -43,6 +43,8 @@ openai_base_url = "http://127.0.0.1:39493/v1"
 - Codex WebSocket-only fields `type`, `generate`, and `previous_response_id` are not sent to HTTP upstream.
 - Prewarm frames with `generate:false` are answered locally.
 - Per-connection in-memory state reconstructs tool-call context for stateless upstream relays.
+- Adapted `/v1/models` responses advertise the Codex `fast` speed tier and preserve `service_tier` on model requests.
+- WebSocket compression is disabled for Codex client compatibility.
 
 ## Verify
 

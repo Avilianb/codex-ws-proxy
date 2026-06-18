@@ -34,7 +34,7 @@ func TestLoadConfigAppliesDefaults(t *testing.T) {
 	if cfg.WebSocketMode != "bridge" {
 		t.Fatalf("WebSocketMode = %q", cfg.WebSocketMode)
 	}
-	if cfg.WebSocketCompression == nil || !*cfg.WebSocketCompression {
+	if cfg.WebSocketCompression == nil || *cfg.WebSocketCompression {
 		t.Fatalf("WebSocketCompression default = %#v", cfg.WebSocketCompression)
 	}
 	if cfg.TimeoutSeconds != 600 {

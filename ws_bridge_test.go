@@ -139,14 +139,116 @@ func TestWebSocketBridgePostsHTTPAndStreamsSSEData(t *testing.T) {
 	}
 }
 
-func TestWebSocketCompressionNegotiationFollowsConfig(t *testing.T) {
+func TestWebSocketBridgeAcceptsFragmentedTextMessage(t *testing.T) {
+	upstreamBodies := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		upstreamBodies <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	frame := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{map[string]any{"type": "message", "role": "user", "content": "hi"}},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": true,
+	}
+	payload, _ := json.Marshal(frame)
+	splitAt := len(payload) / 2
+	writeTestWSFrame(t, conn, false, wsOpcodeText, payload[:splitAt])
+	writeTestWSFrame(t, conn, true, wsOpcodeContinuation, payload[splitAt:])
+
+	first := readTestWSText(t, conn)
+	second := readTestWSText(t, conn)
+	if !strings.Contains(string(first), "response.created") {
+		t.Fatalf("first event = %q", first)
+	}
+	if !strings.Contains(string(second), "response.completed") {
+		t.Fatalf("second event = %q", second)
+	}
+
+	body := <-upstreamBodies
+	if body["model"] != "gpt-test" {
+		t.Fatalf("model = %#v", body["model"])
+	}
+}
+
+func TestWebSocketBridgeDoesNotUseHTTPClientTimeoutForSSEStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"))
+		flusher.Flush()
+		time.Sleep(80 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key", TimeoutSeconds: 5}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, &http.Client{Timeout: 25 * time.Millisecond, Transport: upstream.Client().Transport})
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	frame := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": true,
+	}
+	payload, _ := json.Marshal(frame)
+	writeTestWSText(t, conn, payload)
+
+	first := readTestWSText(t, conn)
+	second := readTestWSText(t, conn)
+
+	if !strings.Contains(string(first), "response.created") {
+		t.Fatalf("first event = %q", first)
+	}
+	if !strings.Contains(string(second), "response.completed") {
+		t.Fatalf("second event = %q", second)
+	}
+}
+
+func TestWebSocketCompressionNegotiationIsDeclined(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		enabled       bool
-		wantExtension bool
+		name    string
+		enabled bool
 	}{
-		{name: "enabled", enabled: true, wantExtension: true},
-		{name: "disabled", enabled: false, wantExtension: false},
+		{name: "enabled in config", enabled: true},
+		{name: "disabled in config", enabled: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
@@ -165,14 +267,14 @@ func TestWebSocketCompressionNegotiationFollowsConfig(t *testing.T) {
 			defer conn.Close()
 
 			gotExtension := strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate")
-			if gotExtension != tc.wantExtension {
-				t.Fatalf("extension negotiated = %v, want %v", gotExtension, tc.wantExtension)
+			if gotExtension {
+				t.Fatalf("compression extension was negotiated")
 			}
 		})
 	}
 }
 
-func TestWebSocketCompressionNegotiatedPrewarmFrameIsReadable(t *testing.T) {
+func TestWebSocketCompressionRequestStillGetsPlainPrewarmFrame(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -190,8 +292,8 @@ func TestWebSocketCompressionNegotiatedPrewarmFrameIsReadable(t *testing.T) {
 	defer cancel()
 	conn, resp := dialTestWSWithExtensions(t, ctx, wsURL, "permessage-deflate")
 	defer conn.Close()
-	if !strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
-		t.Fatalf("compression was not negotiated")
+	if strings.Contains(resp.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		t.Fatalf("compression was negotiated")
 	}
 
 	prewarm := map[string]any{
@@ -209,15 +311,11 @@ func TestWebSocketCompressionNegotiatedPrewarmFrameIsReadable(t *testing.T) {
 	if opcode != 0x1 {
 		t.Fatalf("opcode = %d", opcode)
 	}
-	if !compressed {
-		t.Fatalf("expected compressed server frame")
+	if compressed {
+		t.Fatalf("server frame was compressed")
 	}
-	inflated, err := decompressWSMessage(first)
-	if err != nil {
-		t.Fatalf("decompress server frame: %v", err)
-	}
-	if !json.Valid(inflated) {
-		t.Fatalf("inflated frame is not JSON: %q", inflated)
+	if !json.Valid(first) {
+		t.Fatalf("frame is not JSON: %q", first)
 	}
 }
 
@@ -355,7 +453,16 @@ func dialTestWSWithExtensions(t *testing.T, ctx context.Context, rawURL, extensi
 
 func writeTestWSText(t *testing.T, conn *testWSConn, payload []byte) {
 	t.Helper()
-	frame := []byte{0x81}
+	writeTestWSFrame(t, conn, true, wsOpcodeText, payload)
+}
+
+func writeTestWSFrame(t *testing.T, conn *testWSConn, fin bool, opcode byte, payload []byte) {
+	t.Helper()
+	firstByte := opcode
+	if fin {
+		firstByte |= 0x80
+	}
+	frame := []byte{firstByte}
 	maskKey := []byte{1, 2, 3, 4}
 	length := len(payload)
 	switch {

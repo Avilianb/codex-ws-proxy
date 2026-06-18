@@ -56,6 +56,7 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	} else {
 		s.fullInput = appendDedupe(s.fullInput, reconstructed...)
 	}
+	sanitizeResponsesBody(body)
 	return json.Marshal(body)
 }
 
@@ -213,5 +214,22 @@ func cloneValue(value any) any {
 		return cloneItems(v)
 	default:
 		return v
+	}
+}
+
+func sanitizeResponsesBody(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if key == "summary" && child == nil {
+				delete(v, key)
+				continue
+			}
+			sanitizeResponsesBody(child)
+		}
+	case []any:
+		for _, child := range v {
+			sanitizeResponsesBody(child)
+		}
 	}
 }

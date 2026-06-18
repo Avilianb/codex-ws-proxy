@@ -6,7 +6,7 @@
   "auth_header": "Authorization",
   "auth_scheme": "Bearer",
   "websocket_mode": "bridge",
-  "websocket_compression": true,
+  "websocket_compression": false,
   "timeout_seconds": 600,
   "log_requests": true
 }
