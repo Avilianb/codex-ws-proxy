@@ -133,7 +133,7 @@ func TestBridgeStateDropsNullSummaryFromReconstructedContext(t *testing.T) {
 	decoded := decodeBody(t, body)
 	input := decoded["input"].([]any)
 
-	var sawNullSummary bool
+	var sawEmptySummary bool
 	var sawNonNullSummary bool
 	for _, raw := range input {
 		item, ok := raw.(map[string]any)
@@ -141,14 +141,15 @@ func TestBridgeStateDropsNullSummaryFromReconstructedContext(t *testing.T) {
 			continue
 		}
 		if item["id"] == "rs-1" {
-			_, sawNullSummary = item["summary"]
+			summary, ok := item["summary"].([]any)
+			sawEmptySummary = ok && len(summary) == 0
 		}
 		if item["id"] == "rs-2" {
 			_, sawNonNullSummary = item["summary"]
 		}
 	}
-	if sawNullSummary {
-		t.Fatalf("null summary was preserved: %#v", input)
+	if !sawEmptySummary {
+		t.Fatalf("null reasoning summary was not normalized to an empty array: %#v", input)
 	}
 	if !sawNonNullSummary {
 		t.Fatalf("non-null summary was removed: %#v", input)
@@ -164,6 +165,8 @@ func TestBridgeStateDropsInvalidSummaryFromIncomingInput(t *testing.T) {
 			map[string]any{"type": "reasoning", "id": "rs-1", "summary": nil},
 			map[string]any{"type": "reasoning", "id": "rs-2", "summary": "bad"},
 			map[string]any{"type": "reasoning", "id": "rs-3", "summary": []any{map[string]any{"type": "summary_text", "text": "kept"}}},
+			map[string]any{"type": "reasoning", "id": "rs-4"},
+			map[string]any{"type": "message", "id": "msg-1", "summary": "bad"},
 		},
 	})
 	if err != nil {
@@ -175,13 +178,18 @@ func TestBridgeStateDropsInvalidSummaryFromIncomingInput(t *testing.T) {
 	for _, raw := range input {
 		item := raw.(map[string]any)
 		switch item["id"] {
-		case "rs-1", "rs-2":
-			if _, ok := item["summary"]; ok {
-				t.Fatalf("invalid summary was preserved: %#v", input)
+		case "rs-1", "rs-2", "rs-4":
+			summary, ok := item["summary"].([]any)
+			if !ok || len(summary) != 0 {
+				t.Fatalf("invalid reasoning summary was not normalized: %#v", input)
 			}
 		case "rs-3":
 			if _, ok := item["summary"]; !ok {
 				t.Fatalf("array summary was removed: %#v", input)
+			}
+		case "msg-1":
+			if _, ok := item["summary"]; ok {
+				t.Fatalf("non-reasoning invalid summary was preserved: %#v", input)
 			}
 		}
 	}

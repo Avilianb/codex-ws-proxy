@@ -220,8 +220,17 @@ func cloneValue(value any) any {
 func sanitizeResponsesBody(value any) {
 	switch v := value.(type) {
 	case map[string]any:
+		itemType, _ := v["type"].(string)
+		if itemType == "reasoning" {
+			if _, ok := v["summary"].([]any); !ok {
+				v["summary"] = []any{}
+			}
+		}
 		for key, child := range v {
 			if key == "summary" {
+				if itemType == "reasoning" {
+					continue
+				}
 				if _, ok := child.([]any); !ok {
 					delete(v, key)
 					continue

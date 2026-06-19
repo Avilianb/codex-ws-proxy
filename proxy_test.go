@@ -79,7 +79,7 @@ func TestHTTPProxySanitizesResponsesBody(t *testing.T) {
 	cfg.ApplyDefaults()
 	proxy := NewProxy(cfg, upstream.Client())
 
-	body := `{"input":[{"type":"reasoning","id":"rs-1","summary":null},{"type":"reasoning","id":"rs-2","summary":"bad"},{"type":"reasoning","id":"rs-3","summary":[{"type":"summary_text","text":"kept"}]}],"stream":true}`
+	body := `{"input":[{"type":"reasoning","id":"rs-1","summary":null},{"type":"reasoning","id":"rs-2","summary":"bad"},{"type":"reasoning","id":"rs-3","summary":[{"type":"summary_text","text":"kept"}]},{"type":"reasoning","id":"rs-4"},{"type":"message","id":"msg-1","summary":"bad"}],"stream":true}`
 	req := httptest.NewRequest(http.MethodPost, "http://local/v1/responses", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 
@@ -93,13 +93,18 @@ func TestHTTPProxySanitizesResponsesBody(t *testing.T) {
 	for _, raw := range input {
 		item := raw.(map[string]any)
 		switch item["id"] {
-		case "rs-1", "rs-2":
-			if _, ok := item["summary"]; ok {
-				t.Fatalf("invalid summary was preserved: %#v", input)
+		case "rs-1", "rs-2", "rs-4":
+			summary, ok := item["summary"].([]any)
+			if !ok || len(summary) != 0 {
+				t.Fatalf("invalid reasoning summary was not normalized: %#v", input)
 			}
 		case "rs-3":
 			if _, ok := item["summary"]; !ok {
 				t.Fatalf("array summary was removed: %#v", input)
+			}
+		case "msg-1":
+			if _, ok := item["summary"]; ok {
+				t.Fatalf("non-reasoning invalid summary was preserved: %#v", input)
 			}
 		}
 	}
