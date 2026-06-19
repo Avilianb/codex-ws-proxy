@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,48 @@ func TestHTTPProxyPassesThroughNonJSONResponsesBody(t *testing.T) {
 	if got := <-upstreamBodies; got != `(not json)` {
 		t.Fatalf("body = %q", got)
 	}
+}
+
+func TestHTTPProxyRetriesTransientResponsesNetworkError(t *testing.T) {
+	rt := &flakyRoundTripper{}
+	cfg := Config{UpstreamBaseURL: "https://relay.example/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, &http.Client{Transport: rt})
+
+	req := httptest.NewRequest(http.MethodPost, "http://local/v1/responses", strings.NewReader(`{"input":[]}`))
+	rr := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rt.attempts != 2 {
+		t.Fatalf("attempts = %d", rt.attempts)
+	}
+	if rt.body != `{"input":[]}` {
+		t.Fatalf("retried body = %q", rt.body)
+	}
+}
+
+type flakyRoundTripper struct {
+	attempts int
+	body     string
+}
+
+func (f *flakyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.attempts++
+	if f.attempts == 1 {
+		return nil, errors.New(`dial tcp 151.240.13.116:443: connectex: A connection attempt failed`)
+	}
+	body, _ := io.ReadAll(req.Body)
+	f.body = string(body)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}, nil
 }
 
 func TestHTTPProxyAdaptsOpenAIModelsResponseForCodex(t *testing.T) {

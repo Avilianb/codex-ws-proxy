@@ -81,7 +81,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header = SanitizeHeaders(r.Header, p.cfg)
 
-	resp, err := p.client.Do(req)
+	resp, err := doUpstreamRequest(p.client, req)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream request failed: %v", err), http.StatusBadGateway)
 		return
@@ -276,5 +276,69 @@ func codexModelMessages(base any) map[string]any {
 			"personality_pragmatic": "# Personality\n\nYou are a pragmatic, effective software engineer. You communicate efficiently, focus on the task, and keep the user clearly informed about actionable next steps.",
 			"personality_friendly":  "# Personality\n\nYou are a warm, curious collaborator. You stay clear, helpful, and proactive while keeping the work moving.",
 		},
+	}
+}
+
+const upstreamMaxAttempts = 2
+
+func doUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < upstreamMaxAttempts; attempt++ {
+		if attempt > 0 {
+			if err := rewindRequestBody(req); err != nil {
+				return nil, lastErr
+			}
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !shouldRetryUpstreamTransportError(req, err, attempt) {
+			return nil, err
+		}
+		if !sleepBeforeRetry(req.Context(), 250*time.Millisecond) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func shouldRetryUpstreamTransportError(req *http.Request, err error, attempt int) bool {
+	if attempt+1 >= upstreamMaxAttempts || err == nil || req.Context().Err() != nil {
+		return false
+	}
+	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "dial tcp") ||
+		strings.Contains(msg, "connectex") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "lookup ") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "TLS handshake timeout")
+}
+
+func rewindRequestBody(req *http.Request) error {
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return err
+	}
+	req.Body = body
+	return nil
+}
+
+func sleepBeforeRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

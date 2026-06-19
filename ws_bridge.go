@@ -111,7 +111,7 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 		streamClient.Timeout = 0
 		client = &streamClient
 	}
-	resp, err := client.Do(req)
+	resp, err := doUpstreamRequest(client, req)
 	if err != nil {
 		return sendWSError(ctx, conn, "upstream request failed", err.Error())
 	}
