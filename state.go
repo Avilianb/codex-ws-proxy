@@ -221,9 +221,11 @@ func sanitizeResponsesBody(value any) {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, child := range v {
-			if key == "summary" && child == nil {
-				delete(v, key)
-				continue
+			if key == "summary" {
+				if _, ok := child.([]any); !ok {
+					delete(v, key)
+					continue
+				}
 			}
 			sanitizeResponsesBody(child)
 		}
@@ -232,4 +234,13 @@ func sanitizeResponsesBody(value any) {
 			sanitizeResponsesBody(child)
 		}
 	}
+}
+
+func sanitizeResponsesJSONBody(data []byte) ([]byte, error) {
+	var body any
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, err
+	}
+	sanitizeResponsesBody(body)
+	return json.Marshal(body)
 }

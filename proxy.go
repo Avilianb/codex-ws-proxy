@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,7 +55,26 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, r.Body)
+	body := io.Reader(r.Body)
+	if r.URL.Path == p.cfg.LocalBasePath+"/responses" && r.Body != nil {
+		data, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, fmt.Sprintf("read responses request body: %v", readErr), http.StatusBadRequest)
+			return
+		}
+		if len(data) > 0 {
+			sanitized, sanitizeErr := sanitizeResponsesJSONBody(data)
+			if sanitizeErr != nil {
+				body = bytes.NewReader(data)
+			} else {
+				body = bytes.NewReader(sanitized)
+			}
+		} else {
+			body = bytes.NewReader(data)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("build upstream request: %v", err), http.StatusBadGateway)
 		return

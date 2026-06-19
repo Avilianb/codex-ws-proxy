@@ -89,6 +89,10 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 	if err != nil {
 		return fmt.Errorf("build HTTP body: %w", err)
 	}
+	body, err = sanitizeResponsesJSONBody(body)
+	if err != nil {
+		return fmt.Errorf("sanitize HTTP body: %w", err)
+	}
 	upstreamURL, err := p.cfg.UpstreamURLFor(p.cfg.LocalBasePath + "/responses")
 	if err != nil {
 		return err

@@ -154,3 +154,35 @@ func TestBridgeStateDropsNullSummaryFromReconstructedContext(t *testing.T) {
 		t.Fatalf("non-null summary was removed: %#v", input)
 	}
 }
+
+func TestBridgeStateDropsInvalidSummaryFromIncomingInput(t *testing.T) {
+	state := NewBridgeState()
+	body, err := state.BuildHTTPBody(map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{
+			map[string]any{"type": "reasoning", "id": "rs-1", "summary": nil},
+			map[string]any{"type": "reasoning", "id": "rs-2", "summary": "bad"},
+			map[string]any{"type": "reasoning", "id": "rs-3", "summary": []any{map[string]any{"type": "summary_text", "text": "kept"}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeBody(t, body)
+	input := decoded["input"].([]any)
+
+	for _, raw := range input {
+		item := raw.(map[string]any)
+		switch item["id"] {
+		case "rs-1", "rs-2":
+			if _, ok := item["summary"]; ok {
+				t.Fatalf("invalid summary was preserved: %#v", input)
+			}
+		case "rs-3":
+			if _, ok := item["summary"]; !ok {
+				t.Fatalf("array summary was removed: %#v", input)
+			}
+		}
+	}
+}

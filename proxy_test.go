@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,76 @@ func TestHTTPProxyForwardsSanitizedRequest(t *testing.T) {
 	}
 	if rr.Body.String() != `{"ok":true}` {
 		t.Fatalf("response body = %q", rr.Body.String())
+	}
+}
+
+func TestHTTPProxySanitizesResponsesBody(t *testing.T) {
+	upstreamBodies := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		upstreamBodies <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+
+	body := `{"input":[{"type":"reasoning","id":"rs-1","summary":null},{"type":"reasoning","id":"rs-2","summary":"bad"},{"type":"reasoning","id":"rs-3","summary":[{"type":"summary_text","text":"kept"}]}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "http://local/v1/responses", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := <-upstreamBodies
+	input := got["input"].([]any)
+	for _, raw := range input {
+		item := raw.(map[string]any)
+		switch item["id"] {
+		case "rs-1", "rs-2":
+			if _, ok := item["summary"]; ok {
+				t.Fatalf("invalid summary was preserved: %#v", input)
+			}
+		case "rs-3":
+			if _, ok := item["summary"]; !ok {
+				t.Fatalf("array summary was removed: %#v", input)
+			}
+		}
+	}
+}
+
+func TestHTTPProxyPassesThroughNonJSONResponsesBody(t *testing.T) {
+	upstreamBodies := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBodies <- string(body)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+
+	req := httptest.NewRequest(http.MethodPost, "http://local/v1/responses", strings.NewReader(`(not json)`))
+	rr := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := <-upstreamBodies; got != `(not json)` {
+		t.Fatalf("body = %q", got)
 	}
 }
 
