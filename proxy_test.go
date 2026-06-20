@@ -243,6 +243,35 @@ func TestHTTPProxyAdaptsOpenAIModelsResponseForCodex(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyDoesNotTruncateLargeModelsResponse(t *testing.T) {
+	largeDescription := strings.Repeat("x", 4*1024*1024)
+	upstreamBody := `{"models":[{"slug":"gpt-test","description":"` + largeDescription + `"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "http://local/v1/models", nil)
+	rr := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if rr.Body.String() != upstreamBody {
+		t.Fatalf("models response was truncated or changed: got %d bytes, want %d", rr.Body.Len(), len(upstreamBody))
+	}
+}
+
 func TestHTTPProxyRejectsOutsideBasePath(t *testing.T) {
 	cfg := Config{UpstreamBaseURL: "https://relay.example/v1", LocalBasePath: "/v1", APIKey: "relay-key"}
 	cfg.ApplyDefaults()

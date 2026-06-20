@@ -19,16 +19,14 @@ import (
 )
 
 type wsConn struct {
-	conn           net.Conn
-	r              *bufio.Reader
-	compressed     bool
-	fragOpcode     byte
-	fragPayload    []byte
-	fragCompressed bool
+	conn        net.Conn
+	r           *bufio.Reader
+	fragOpcode  byte
+	fragPayload []byte
 }
 
 func (p *Proxy) handleResponsesWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := acceptWS(w, r, p.cfg.WebSocketCompression != nil && *p.cfg.WebSocketCompression)
+	conn, err := acceptWS(w, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -114,12 +112,12 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 	}
 	resp, err := doUpstreamRequest(client, req)
 	if err != nil {
-		return sendWSError(ctx, conn, "upstream request failed", err.Error())
+		return sendWSError(ctx, conn, "upstream request failed", err.Error(), p.cfg.LogRequests)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return sendWSError(ctx, conn, fmt.Sprintf("upstream returned %d", resp.StatusCode), string(detail))
+		return sendWSError(ctx, conn, fmt.Sprintf("upstream returned %d", resp.StatusCode), string(detail), p.cfg.LogRequests)
 	}
 
 	err = readSSEData(resp.Body, func(data []byte) error {
@@ -127,12 +125,14 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 		if trimmed == "" || trimmed == "[DONE]" {
 			return nil
 		}
-		logUpstreamFailureEvent(data)
+		if p.cfg.LogRequests {
+			logUpstreamFailureEvent(data)
+		}
 		state.UpdateFromSSEData(data)
 		return conn.writeText(ctx, data)
 	})
 	if err != nil {
-		return sendWSError(ctx, conn, "upstream stream failed", err.Error())
+		return sendWSError(ctx, conn, "upstream stream failed", err.Error(), p.cfg.LogRequests)
 	}
 	return nil
 }
@@ -169,8 +169,10 @@ func readSSEData(r io.Reader, onData func([]byte) error) error {
 	return flush()
 }
 
-func sendWSError(ctx context.Context, conn *wsConn, message, detail string) error {
-	log.Printf("websocket bridge sending response.failed: message=%q detail=%q", message, truncateForLog(detail, 2048))
+func sendWSError(ctx context.Context, conn *wsConn, message, detail string, logDetail bool) error {
+	if logDetail {
+		log.Printf("websocket bridge sending response.failed: message=%q detail=%q", message, truncateForLog(detail, 2048))
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"type":  "response.failed",
 		"error": map[string]any{"message": message, "detail": detail},
@@ -256,7 +258,7 @@ const (
 	maxSSEEventBytes       = 64 * 1024 * 1024
 )
 
-func acceptWS(w http.ResponseWriter, r *http.Request, allowCompression bool) (*wsConn, error) {
+func acceptWS(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 	if !isWebSocketUpgrade(r) {
 		return nil, errors.New("not a websocket upgrade")
 	}
@@ -272,16 +274,11 @@ func acceptWS(w http.ResponseWriter, r *http.Request, allowCompression bool) (*w
 	if err != nil {
 		return nil, err
 	}
-	_ = allowCompression
-	compressed := false
 	accept := computeWebSocketAccept(key)
 	response := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Sec-WebSocket-Accept: " + accept + "\r\n"
-	if compressed {
-		response += "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"
-	}
 	response += "\r\n"
 	if _, err := rw.WriteString(response); err != nil {
 		netConn.Close()
@@ -291,16 +288,7 @@ func acceptWS(w http.ResponseWriter, r *http.Request, allowCompression bool) (*w
 		netConn.Close()
 		return nil, err
 	}
-	return &wsConn{conn: netConn, r: rw.Reader, compressed: compressed}, nil
-}
-
-func clientRequestedDeflate(ext string) bool {
-	for _, part := range strings.Split(ext, ",") {
-		if strings.EqualFold(strings.TrimSpace(strings.Split(part, ";")[0]), "permessage-deflate") {
-			return true
-		}
-	}
-	return false
+	return &wsConn{conn: netConn, r: rw.Reader}, nil
 }
 
 func computeWebSocketAccept(key string) string {
@@ -395,11 +383,7 @@ func (c *wsConn) readFrame() ([]byte, byte, error) {
 			}
 			payload = append([]byte(nil), c.fragPayload...)
 			opcode = c.fragOpcode
-			compressed := c.fragCompressed
 			c.resetFragment()
-			if compressed {
-				return nil, 0, errors.New("unexpected compressed websocket frame")
-			}
 			return payload, opcode, nil
 		case wsOpcodeClose, wsOpcodePing, wsOpcodePong:
 			if !fin {
@@ -420,7 +404,6 @@ func (c *wsConn) readFrame() ([]byte, byte, error) {
 
 func (c *wsConn) resetFragment() {
 	c.fragOpcode = 0
-	c.fragCompressed = false
 	c.fragPayload = nil
 }
 

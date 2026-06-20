@@ -94,9 +94,25 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == p.cfg.LocalBasePath+"/models" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxModelsAdaptBytes+1))
 		if readErr != nil {
 			http.Error(w, fmt.Sprintf("read upstream models response: %v", readErr), http.StatusBadGateway)
+			return
+		}
+		if len(data) > maxModelsAdaptBytes {
+			w.WriteHeader(resp.StatusCode)
+			written, writeErr := w.Write(data)
+			if writeErr == nil {
+				var copied int64
+				copied, writeErr = io.Copy(w, resp.Body)
+				written += int(copied)
+			}
+			if p.cfg.LogRequests {
+				log.Printf("%s %s -> %s status=%d bytes=%d duration=%s", r.Method, r.URL.RequestURI(), upstreamURL, resp.StatusCode, written, time.Since(start))
+			}
+			if writeErr != nil {
+				log.Printf("copy upstream models response failed: %v", writeErr)
+			}
 			return
 		}
 		if adapted, ok := adaptModelsResponse(data); ok {
@@ -259,6 +275,8 @@ func adaptModelsResponse(data []byte) ([]byte, bool) {
 	}
 	return out, true
 }
+
+const maxModelsAdaptBytes = 4 * 1024 * 1024
 
 func codexBaseInstructions() string {
 	return "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled."

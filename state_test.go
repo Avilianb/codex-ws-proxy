@@ -141,6 +141,61 @@ func TestBridgeStateDoesNotDuplicateContextWhenIncomingAlreadyHasHistory(t *test
 	}
 }
 
+func TestBridgeStateKeepsSavedContextWhenIncomingHasPartialHistory(t *testing.T) {
+	state := NewBridgeState()
+	firstInput := map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "original"}}}
+	first := map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{firstInput},
+		"tools": []any{},
+	}
+	if _, err := state.BuildHTTPBody(first); err != nil {
+		t.Fatal(err)
+	}
+	state.UpdateFromSSEData([]byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"msg-upstream","role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}}`))
+
+	second := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-test",
+		"previous_response_id": "resp-1",
+		"input": []any{
+			map[string]any{"type": "message", "id": "msg-client", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}},
+			map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "next"}}},
+		},
+		"tools": []any{},
+	}
+	body, err := state.BuildHTTPBody(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeBody(t, body)
+	input := decoded["input"].([]any)
+
+	var sawOriginal bool
+	var sawAnswer bool
+	var sawNext bool
+	for _, raw := range input {
+		item := raw.(map[string]any)
+		content, _ := item["content"].([]any)
+		if len(content) == 0 {
+			continue
+		}
+		part := content[0].(map[string]any)
+		switch part["text"] {
+		case "original":
+			sawOriginal = true
+		case "answer":
+			sawAnswer = true
+		case "next":
+			sawNext = true
+		}
+	}
+	if !sawOriginal || !sawAnswer || !sawNext {
+		t.Fatalf("reconstructed input missing original=%v answer=%v next=%v: %#v", sawOriginal, sawAnswer, sawNext, input)
+	}
+}
+
 func TestBridgeStatePreservesServiceTier(t *testing.T) {
 	state := NewBridgeState()
 	body, err := state.BuildHTTPBody(map[string]any{

@@ -28,13 +28,13 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	incomingAlreadyHasContext := false
 	if previousID != "" {
 		if ctx, ok := s.responseContexts[previousID]; ok {
-			if hasOutputContextOverlap(ctx, incoming) {
+			if incomingCoversContext(ctx, incoming) {
 				incomingAlreadyHasContext = true
 			} else {
 				reconstructed = appendDedupe(cloneItems(ctx), incoming...)
 			}
 		} else if len(s.fullInput) > 0 {
-			if hasOutputContextOverlap(s.fullInput, incoming) {
+			if incomingCoversContext(s.fullInput, incoming) {
 				incomingAlreadyHasContext = true
 			} else {
 				reconstructed = appendDedupe(cloneItems(s.fullInput), incoming...)
@@ -69,7 +69,7 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-func hasOutputContextOverlap(contextItems, incoming []any) bool {
+func incomingCoversContext(contextItems, incoming []any) bool {
 	if len(contextItems) == 0 || len(incoming) == 0 {
 		return false
 	}
@@ -80,31 +80,18 @@ func hasOutputContextOverlap(contextItems, incoming []any) bool {
 			incomingKeys[key] = true
 		}
 	}
+	checked := 0
 	for _, item := range contextItems {
-		if !isOutputContextItem(item) {
+		key := semanticItemKey(item)
+		if key == "" {
 			continue
 		}
-		if incomingKeys[semanticItemKey(item)] {
-			return true
+		checked++
+		if !incomingKeys[key] {
+			return false
 		}
 	}
-	return false
-}
-
-func isOutputContextItem(item any) bool {
-	m, ok := item.(map[string]any)
-	if !ok {
-		return false
-	}
-	if role, _ := m["role"].(string); role == "assistant" {
-		return true
-	}
-	switch typ, _ := m["type"].(string); typ {
-	case "reasoning", "function_call", "custom_tool_call":
-		return true
-	default:
-		return false
-	}
+	return checked > 0
 }
 
 func semanticItemKey(item any) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -239,6 +241,95 @@ func TestWebSocketBridgeDoesNotUseHTTPClientTimeoutForSSEStream(t *testing.T) {
 	}
 	if !strings.Contains(string(second), "response.completed") {
 		t.Fatalf("second event = %q", second)
+	}
+}
+
+func TestWebSocketBridgeDoesNotLogUpstreamHTTPErrorDetailByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(originalLogOutput)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "secret-detail", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key", LogRequests: false}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	frame := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": true,
+	}
+	payload, _ := json.Marshal(frame)
+	writeTestWSText(t, conn, payload)
+
+	failed := readTestWSText(t, conn)
+	if !strings.Contains(string(failed), "secret-detail") {
+		t.Fatalf("expected client error frame to include upstream detail, got %q", failed)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("unexpected default bridge error log: %q", got)
+	}
+}
+
+func TestWebSocketBridgeDoesNotLogUpstreamFailureEventByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(originalLogOutput)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"error\":{\"message\":\"secret-event\"}}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := Config{UpstreamBaseURL: upstream.URL + "/v1", LocalBasePath: "/v1", APIKey: "relay-key", LogRequests: false}
+	cfg.ApplyDefaults()
+	proxy := NewProxy(cfg, upstream.Client())
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):] + "/v1/responses"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialTestWS(t, ctx, wsURL)
+	defer conn.Close()
+
+	frame := map[string]any{
+		"type":     "response.create",
+		"model":    "gpt-test",
+		"input":    []any{},
+		"tools":    []any{},
+		"stream":   true,
+		"generate": true,
+	}
+	payload, _ := json.Marshal(frame)
+	writeTestWSText(t, conn, payload)
+
+	failed := readTestWSText(t, conn)
+	if !strings.Contains(string(failed), "secret-event") {
+		t.Fatalf("expected client event to include upstream detail, got %q", failed)
+	}
+	if got := logs.String(); got != "" {
+		t.Fatalf("unexpected default bridge failure event log: %q", got)
 	}
 }
 
