@@ -25,11 +25,20 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	previousID, _ := msg["previous_response_id"].(string)
 
 	reconstructed := cloneItems(incoming)
+	incomingAlreadyHasContext := false
 	if previousID != "" {
 		if ctx, ok := s.responseContexts[previousID]; ok {
-			reconstructed = appendDedupe(cloneItems(ctx), incoming...)
+			if hasOutputContextOverlap(ctx, incoming) {
+				incomingAlreadyHasContext = true
+			} else {
+				reconstructed = appendDedupe(cloneItems(ctx), incoming...)
+			}
 		} else if len(s.fullInput) > 0 {
-			reconstructed = appendDedupe(cloneItems(s.fullInput), incoming...)
+			if hasOutputContextOverlap(s.fullInput, incoming) {
+				incomingAlreadyHasContext = true
+			} else {
+				reconstructed = appendDedupe(cloneItems(s.fullInput), incoming...)
+			}
 		}
 	}
 	reconstructed = s.ensureFunctionCalls(reconstructed)
@@ -51,13 +60,84 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 	if _, ok := body["stream"]; !ok {
 		body["stream"] = true
 	}
-	if previousID == "" {
+	if previousID == "" || incomingAlreadyHasContext {
 		s.fullInput = cloneItems(reconstructed)
 	} else {
 		s.fullInput = appendDedupe(s.fullInput, reconstructed...)
 	}
 	sanitizeResponsesBody(body)
 	return json.Marshal(body)
+}
+
+func hasOutputContextOverlap(contextItems, incoming []any) bool {
+	if len(contextItems) == 0 || len(incoming) == 0 {
+		return false
+	}
+	incomingKeys := map[string]bool{}
+	for _, item := range incoming {
+		key := semanticItemKey(item)
+		if key != "" {
+			incomingKeys[key] = true
+		}
+	}
+	for _, item := range contextItems {
+		if !isOutputContextItem(item) {
+			continue
+		}
+		if incomingKeys[semanticItemKey(item)] {
+			return true
+		}
+	}
+	return false
+}
+
+func isOutputContextItem(item any) bool {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	if role, _ := m["role"].(string); role == "assistant" {
+		return true
+	}
+	switch typ, _ := m["type"].(string); typ {
+	case "reasoning", "function_call", "custom_tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func semanticItemKey(item any) string {
+	normalized := stripVolatileFields(normalizeValue(item))
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func stripVolatileFields(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			switch key {
+			case "id", "status":
+				continue
+			default:
+				out[key] = stripVolatileFields(child)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = stripVolatileFields(item)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func (s *BridgeState) UpdateFromSSEData(data []byte) {

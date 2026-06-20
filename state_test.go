@@ -92,6 +92,55 @@ func TestBridgeStateReconstructsFunctionCallOutputContext(t *testing.T) {
 	}
 }
 
+func TestBridgeStateDoesNotDuplicateContextWhenIncomingAlreadyHasHistory(t *testing.T) {
+	state := NewBridgeState()
+	firstInput := map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "hello"}}}
+	first := map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{firstInput},
+		"tools": []any{},
+	}
+	if _, err := state.BuildHTTPBody(first); err != nil {
+		t.Fatal(err)
+	}
+	state.UpdateFromSSEData([]byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"msg-upstream","role":"assistant","content":[{"type":"output_text","text":"hello back"}]}]}}`))
+
+	second := map[string]any{
+		"type":                 "response.create",
+		"model":                "gpt-test",
+		"previous_response_id": "resp-1",
+		"input": []any{
+			firstInput,
+			map[string]any{"type": "message", "id": "msg-client", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "hello back"}}},
+			map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "next"}}},
+		},
+		"tools": []any{},
+	}
+	body, err := state.BuildHTTPBody(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeBody(t, body)
+	input := decoded["input"].([]any)
+
+	var assistantCopies int
+	for _, raw := range input {
+		item := raw.(map[string]any)
+		if item["role"] != "assistant" {
+			continue
+		}
+		content := item["content"].([]any)
+		part := content[0].(map[string]any)
+		if part["text"] == "hello back" {
+			assistantCopies++
+		}
+	}
+	if assistantCopies != 1 {
+		t.Fatalf("assistant context copies = %d, want 1: %#v", assistantCopies, input)
+	}
+}
+
 func TestBridgeStatePreservesServiceTier(t *testing.T) {
 	state := NewBridgeState()
 	body, err := state.BuildHTTPBody(map[string]any{
