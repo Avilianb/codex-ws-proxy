@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -126,6 +127,7 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 		if trimmed == "" || trimmed == "[DONE]" {
 			return nil
 		}
+		logUpstreamFailureEvent(data)
 		state.UpdateFromSSEData(data)
 		return conn.writeText(ctx, data)
 	})
@@ -137,7 +139,7 @@ func (p *Proxy) bridgeToUpstream(ctx context.Context, conn *wsConn, state *Bridg
 
 func readSSEData(r io.Reader, onData func([]byte) error) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEEventBytes)
 	var dataLines [][]byte
 	flush := func() error {
 		if len(dataLines) == 0 {
@@ -168,6 +170,7 @@ func readSSEData(r io.Reader, onData func([]byte) error) error {
 }
 
 func sendWSError(ctx context.Context, conn *wsConn, message, detail string) error {
+	log.Printf("websocket bridge sending response.failed: message=%q detail=%q", message, truncateForLog(detail, 2048))
 	payload, _ := json.Marshal(map[string]any{
 		"type":  "response.failed",
 		"error": map[string]any{"message": message, "detail": detail},
@@ -178,6 +181,45 @@ func sendWSError(ctx context.Context, conn *wsConn, message, detail string) erro
 		defer cancel()
 	}
 	return conn.writeText(ctx, payload)
+}
+
+func logUpstreamFailureEvent(data []byte) {
+	var event map[string]any
+	if err := json.Unmarshal(data, &event); err != nil {
+		return
+	}
+	typ, _ := event["type"].(string)
+	if typ != "response.failed" && typ != "error" {
+		return
+	}
+	log.Printf("upstream sent %s event: %s", typ, summarizeFailureEvent(event))
+}
+
+func summarizeFailureEvent(event map[string]any) string {
+	if raw, ok := event["error"]; ok {
+		if data, err := json.Marshal(raw); err == nil {
+			return truncateForLog(string(data), 2048)
+		}
+	}
+	if raw, ok := event["response"].(map[string]any); ok {
+		if errValue, ok := raw["error"]; ok {
+			if data, err := json.Marshal(errValue); err == nil {
+				return truncateForLog(string(data), 2048)
+			}
+		}
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return "<unserializable>"
+	}
+	return truncateForLog(string(data), 2048)
+}
+
+func truncateForLog(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...[truncated]"
 }
 
 func writeLocalPrewarm(ctx context.Context, conn *wsConn, state *BridgeState) error {
@@ -211,6 +253,7 @@ const (
 	wsCloseUnsupportedData = 1003
 	wsClosePolicyViolation = 1008
 	maxWSMessageBytes      = 16 * 1024 * 1024
+	maxSSEEventBytes       = 64 * 1024 * 1024
 )
 
 func acceptWS(w http.ResponseWriter, r *http.Request, allowCompression bool) (*wsConn, error) {

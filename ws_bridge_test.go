@@ -242,6 +242,24 @@ func TestWebSocketBridgeDoesNotUseHTTPClientTimeoutForSSEStream(t *testing.T) {
 	}
 }
 
+func TestReadSSEDataAllowsLargeEventsWithinWebSocketLimit(t *testing.T) {
+	payload := strings.Repeat("x", 5*1024*1024)
+	stream := "data: " + payload + "\n\n"
+	var got []byte
+
+	err := readSSEData(strings.NewReader(stream), func(data []byte) error {
+		got = append([]byte(nil), data...)
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("readSSEData returned error: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("payload length = %d, want %d", len(got), len(payload))
+	}
+}
+
 func TestWebSocketCompressionNegotiationIsDeclined(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
