@@ -31,13 +31,13 @@ func (s *BridgeState) BuildHTTPBody(msg map[string]any) ([]byte, error) {
 			if incomingCoversContext(ctx, incoming) {
 				incomingAlreadyHasContext = true
 			} else {
-				reconstructed = appendDedupe(cloneItems(ctx), incoming...)
+				reconstructed = appendContextDedupe(cloneItems(ctx), incoming...)
 			}
 		} else if len(s.fullInput) > 0 {
 			if incomingCoversContext(s.fullInput, incoming) {
 				incomingAlreadyHasContext = true
 			} else {
-				reconstructed = appendDedupe(cloneItems(s.fullInput), incoming...)
+				reconstructed = appendContextDedupe(cloneItems(s.fullInput), incoming...)
 			}
 		}
 	}
@@ -92,6 +92,22 @@ func incomingCoversContext(contextItems, incoming []any) bool {
 		}
 	}
 	return checked > 0
+}
+
+func isOutputContextItem(item any) bool {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	if role, _ := m["role"].(string); role == "assistant" {
+		return true
+	}
+	switch typ, _ := m["type"].(string); typ {
+	case "reasoning", "function_call", "custom_tool_call":
+		return true
+	default:
+		return false
+	}
 }
 
 func semanticItemKey(item any) string {
@@ -202,6 +218,30 @@ func asArray(value any) []any {
 		return nil
 	}
 	return items
+}
+
+func appendContextDedupe(base []any, additions ...any) []any {
+	out := cloneItems(base)
+	seen := map[string]bool{}
+	for _, item := range out {
+		seen[contextMergeKey(item)] = true
+	}
+	for _, item := range additions {
+		key := contextMergeKey(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, cloneValue(item))
+	}
+	return out
+}
+
+func contextMergeKey(item any) string {
+	if isOutputContextItem(item) {
+		return "semantic:" + semanticItemKey(item)
+	}
+	return "strict:" + itemKey(item)
 }
 
 func appendDedupe(base []any, additions ...any) []any {

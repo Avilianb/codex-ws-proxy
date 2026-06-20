@@ -173,7 +173,7 @@ func TestBridgeStateKeepsSavedContextWhenIncomingHasPartialHistory(t *testing.T)
 	input := decoded["input"].([]any)
 
 	var sawOriginal bool
-	var sawAnswer bool
+	var answerCopies int
 	var sawNext bool
 	for _, raw := range input {
 		item := raw.(map[string]any)
@@ -186,13 +186,13 @@ func TestBridgeStateKeepsSavedContextWhenIncomingHasPartialHistory(t *testing.T)
 		case "original":
 			sawOriginal = true
 		case "answer":
-			sawAnswer = true
+			answerCopies++
 		case "next":
 			sawNext = true
 		}
 	}
-	if !sawOriginal || !sawAnswer || !sawNext {
-		t.Fatalf("reconstructed input missing original=%v answer=%v next=%v: %#v", sawOriginal, sawAnswer, sawNext, input)
+	if !sawOriginal || answerCopies != 1 || !sawNext {
+		t.Fatalf("reconstructed input has original=%v answer copies=%d next=%v, want original + one answer + next: %#v", sawOriginal, answerCopies, sawNext, input)
 	}
 }
 
